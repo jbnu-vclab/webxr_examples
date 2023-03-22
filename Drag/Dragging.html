@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>three.js vr - dragging</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+		<link type="text/css" rel="stylesheet" href="main.css">
+	</head>
+	<body>
+
+		<div id="info">
+			<a href="https://threejs.org" target="_blank" rel="noopener">three.js</a> vr - dragging
+		</div>
+
+		<script src="../jsm/libs/ammo.wasm.js"></script>
+
+		<!-- Import maps polyfill -->
+		<!-- Remove this when import maps will be widely supported -->
+		<script async src="https://unpkg.com/es-module-shims@1.6.3/dist/es-module-shims.js"></script>
+
+		<script type="importmap">
+			{
+				"imports": {
+					"three": "../build/three.module.js",
+					"three/addons/": "../jsm/"
+				}
+			}
+		</script>
+
+		<script type="module">
+
+			import * as THREE from 'three';
+			import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+			import { AmmoPhysics } from 'three/addons/physics/AmmoPhysics.js'
+			import { VRButton } from 'three/addons/webxr/VRButton.js';
+			import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+			
+			let camera, scene, renderer;
+			let loader,desk, room, floor;
+			const clock = new THREE.Clock();
+			let cube;
+			let group;
+			let physics,position;
+			let intersection_position;
+			const tempMatrix = new THREE.Matrix4();
+
+			let left_controller, right_controller;
+			let left_grip,right_grip;
+			let raycast;
+			let world_pos;
+			let check = false;
+			const intersected = [];
+
+
+			init();
+
+			async function init()
+			{
+				physics = await AmmoPhysics();
+				position = new THREE.Vector3();
+				//Scene생성
+				scene = new THREE.Scene();
+				scene.background = new THREE.Color(0x666666);
+				group = new THREE.Group();
+				scene.add(group);
+
+				//카메라 생성
+				camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.2, 2000);
+
+				floor = new THREE.Mesh(new THREE.BoxGeometry(30, 5, 30), new THREE.ShadowMaterial({ color: 0x111111 }));
+				floor.position.y = -7;
+				floor.receiveShadow = true;
+				scene.add(floor);
+				physics.addMesh(floor);
+
+
+				//빛 생성
+				scene.add(new THREE.HemisphereLight(0x606060, 0x404040));
+
+				const light = new THREE.DirectionalLight(0xffffff);
+				light.position.set(1, 1, 1).normalize();
+				scene.add(light);
+
+				//cube생성
+				cube = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), new THREE.MeshLambertMaterial());
+				cube.name = 'cube';
+				group.add(cube);
+				physics.addMesh(cube,1);
+				position.set(-2, Math.random() + 1, -5);
+				physics.setMeshPosition(cube, position, 0);
+
+				//Desk 로딩
+				loader = new GLTFLoader();
+				loader.load('./desk/uploads_files_3975458_Dining+Table_v1_002.glb', function (glTF) {
+					desk = glTF.scene.children[0];
+					scene.add(desk);
+					desk.name = 'desk';
+					physics.addMesh(desk, 1);
+					position.set(9, 1, -4);
+					physics.setMeshPosition(desk, position, 0);
+				}
+				);
+
+				//renderer생성
+				renderer = new THREE.WebGLRenderer({ antialias: true });
+				renderer.setSize(window.innerWidth, window / innerHeight);
+				renderer.setPixelRatio(window.devicePixelRatio);
+				renderer.setSize(window.innerWidth, window.innerHeight);
+				renderer.xr.enabled = true;
+				renderer.outputEncoding = THREE.sRGBEncoding;
+				document.body.appendChild(renderer.domElement);
+				document.body.appendChild(VRButton.createButton(renderer));
+
+
+				let baseReferenceSpace = renderer.xr.getReferenceSpace();
+				let offsetPosition = camera.position;
+				let offsetRotation = camera.rotation;
+				console.log(renderer.xr.getReferenceSpace());
+
+				const camera_transform = new XRRigidTransform(offsetPosition,{x:offsetRotation.x,y:offsetRotation.y,z:offsetRotation.z,w:offsetRotation.w});
+
+				//let new_transform = baseReferenceSpace.getOffsetReferenceSpace(camera_transform);
+				renderer.xr.setReferenceSpace(camera_transform);
+
+				//controller생성
+				left_controller = renderer.xr.getController(0);
+				left_controller.addEventListener('selectstart',onSelectStart);
+				left_controller.addEventListener('selectend', onSelectEnd);
+				scene.add(left_controller);
+
+				right_controller = renderer.xr.getController(1);
+				right_controller.addEventListener('selectstart', onSelectStart);
+				right_controller.addEventListener('selectend', onSelectEnd);
+				scene.add(right_controller);
+
+				const controllerModelFactory = new XRControllerModelFactory();
+
+				left_grip = renderer.xr.getControllerGrip(0);
+				left_grip.add(controllerModelFactory.createControllerModel(left_grip));
+				scene.add(left_grip);
+
+				right_grip = renderer.xr.getControllerGrip(1);
+				right_grip.add(controllerModelFactory.createControllerModel(right_grip));
+				scene.add(right_grip);
+
+				const geometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, - 1)]);
+
+				const line = new THREE.Line(geometry);
+				line.name = 'line';
+				line.scale.z = 5;
+
+				left_controller.add(line.clone());
+				right_controller.add(line.clone());
+
+				raycast = new THREE.Raycaster();
+				
+				window.addEventListener('resize', onWindowResize);
+
+				animate();
+			}
+
+			function onWindowResize() {
+
+					camera.aspect = window.innerWidth / window.innerHeight;
+					camera.updateProjectionMatrix();
+
+					renderer.setSize(window.innerWidth, window.innerHeight);
+
+			}
+
+			function onSelectStart(event) {
+
+				const controller = event.target;
+
+				const intersections = getIntersections(controller);
+
+				if (intersections.length > 0) {
+
+					const intersection = intersections[0];
+					const object = intersection.object;
+					object.material.emissive.b = 1;
+					controller.attach(object);
+					physics.change_stopLoop();
+					controller.userData.selected = object;
+
+				}
+
+			}
+
+			function onSelectEnd(event) {
+
+				const controller = event.target;
+
+				if (controller.userData.selected !== undefined) {
+
+					const object = controller.userData.selected;
+					object.material.emissive.b = 0;
+					
+					group.attach(object);
+					physics.change_stopLoop();
+					physics.addMesh(object,1);
+					controller.userData.selected = undefined;
+
+				}
+
+
+
+			}
+			
+			function getIntersections(controller) {
+
+				tempMatrix.identity().extractRotation(controller.matrixWorld);
+
+				raycast.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+				raycast.ray.direction.set(0, 0, - 1).applyMatrix4(tempMatrix);
+ 
+				return raycast.intersectObjects(group.children, false);
+
+			}
+
+			function intersectObjects(controller) {
+
+				// Do not highlight when already selected
+
+				if (controller.userData.selected !== undefined) return;
+
+				const line = controller.getObjectByName('line');
+				const intersections = getIntersections(controller);
+
+				if (intersections.length > 0) {
+
+					const intersection = intersections[0];
+
+					const object = intersection.object;
+					
+					object.material.emissive.r = 1;
+					intersected.push(object);
+
+					line.scale.z = intersection.distance;
+
+				} else {
+
+					line.scale.z = 5;
+
+				}
+
+			}
+			function cleanIntersected() {
+
+				while (intersected.length) {
+
+					const object = intersected.pop();
+					object.material.emissive.r = 0;
+
+				}
+
+			}
+
+			function animate()
+			{
+				renderer.setAnimationLoop(render);
+			}
+
+			function render()
+			{
+				cleanIntersected();
+				//console.log(cube.position);
+				intersectObjects(left_controller);
+				intersectObjects(right_controller);
+
+				//updatePhysics(deltaTime);
+				renderer.render(scene,camera);
+			}
+
+			// function updatePhysics(deltatime)
+			// {
+			// 	physicsWorld.stepSimulation(deltaTime, 10);
+
+			// 	// Update objects
+			// 	for (let i = 0, il = dynamicObjects.length; i < il; i++) {
+
+			// 		const objThree = dynamicObjects[i];
+			// 		const objPhys = objThree.userData.physicsBody;
+			// 		const ms = objPhys.getMotionState();
+			// 		if (ms) {
+
+			// 			ms.getWorldTransform(transformAux1);
+			// 			const p = transformAux1.getOrigin();
+			// 			const q = transformAux1.getRotation();
+			// 			objThree.position.set(p.x(), p.y(), p.z());
+			// 			objThree.quaternion.set(q.x(), q.y(), q.z(), q.w());
+
+			// 		}
+
+			// 	}
+			// }
+
+		</script>
+	</body>
+</html>
